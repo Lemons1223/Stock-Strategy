@@ -1,0 +1,104 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+def download_data(ticker, start_date, end_date):
+    data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+    if data.empty:
+        raise ValueError("DataFrame is empty after downloading. Check your date range or stock ticker.")
+    if 'Close' not in data.columns:
+        raise ValueError("Data does not have a 'Close' column. Check the data source.")
+    return data
+
+def process_data(data):
+    data['Quarterly Returns'] = data['Close'].resample('Q').ffill().pct_change()
+    data.dropna(inplace=True)
+    if data.empty or data['Quarterly Returns'].isnull().all():
+        raise ValueError("No valid quarterly returns found. Check resampling and data availability.")
+    return data
+
+def trading_strategy(returns, buy_threshold, sell_threshold):
+    return np.where(
+        returns > buy_threshold, "Buy",
+        np.where(returns < sell_threshold, "Sell", "Hold")
+    )
+
+def calculate_strategy_returns(data, buy_threshold, sell_threshold):
+    signals = trading_strategy(data['Quarterly Returns'], buy_threshold, sell_threshold)
+    returns = np.where(
+        signals == "Buy", data['Quarterly Returns'],
+        np.where(signals == "Sell", -data['Quarterly Returns'], 0)
+    )
+    return pd.Series(returns, index=data.index)
+
+def objective(params, data):
+    buy_threshold, sell_threshold = params
+    strategy_returns = calculate_strategy_returns(data, buy_threshold, sell_threshold)
+    
+    if strategy_returns.std() == 0:  
+        return np.inf
+    
+    sharpe_ratio = strategy_returns.mean() / strategy_returns.std() * np.sqrt(4)
+    return -sharpe_ratio
+
+def optimize_thresholds(data):
+    result = minimize(
+        objective,
+        [0.05, -0.05],
+        args=(data,),
+        bounds=[(0.005, 0.1), (-0.1, -0.005)]
+    )
+    return result.x
+
+def apply_strategy(data, buy_threshold, sell_threshold):
+    data['Signal'] = trading_strategy(data['Quarterly Returns'], buy_threshold, sell_threshold)
+    data['Strategy Returns'] = calculate_strategy_returns(data, buy_threshold, sell_threshold)
+    data['Cumulative Strategy'] = (1 + data['Strategy Returns']).cumprod()
+    data['Cumulative Benchmark'] = (1 + data['Quarterly Returns']).cumprod()
+    return data
+
+def display_results(data):
+    if not data.empty and 'Signal' in data.columns and not data['Signal'].isnull().all():
+        latest_signal = data['Signal'].iloc[-1]
+        latest_return = data['Quarterly Returns'].iloc[-1]
+
+        print(f"📊 The most recent signal is: {latest_signal}")
+        print(f"📈 Return for this period: {latest_return:.2%}")
+
+        if latest_signal == 'Buy':
+            print("✅ Suggested Action: BUY the stock!")
+        elif latest_signal == 'Sell':
+            print("❌ Suggested Action: SELL the stock!")
+        else:
+            print("⏸️ Suggested Action: HOLD your position!")
+    else:
+        print("⚠️ No valid signal found. Please check your thresholds or data availability.")
+
+# Main execution
+ticker = "AAPL"
+start_date = "2014-05-05"
+end_date = "2024-12-20"
+
+data = download_data(ticker, start_date, end_date)
+data = process_data(data)
+
+buy_threshold, sell_threshold = optimize_thresholds(data)
+print(f"✅ Optimized Buy Threshold: {buy_threshold:.4f}")
+print(f"✅ Optimized Sell Threshold: {sell_threshold:.4f}")
+
+data = apply_strategy(data, buy_threshold, sell_threshold)
+
+# Plot cumulative returns for strategy and benchmark
+plt.figure(figsize=(12, 6))
+plt.plot(data['Cumulative Strategy'], label='Strategy NAV', color='green')
+plt.plot(data['Cumulative Benchmark'], label='Benchmark NAV', color='blue', linestyle='--')
+plt.legend()
+plt.title(f"{ticker} Cumulative Returns: Strategy vs Benchmark")
+plt.xlabel("Date")
+plt.ylabel("Cumulative Returns")
+plt.grid()
+plt.show()
+
+display_results(data)
